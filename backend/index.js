@@ -34,7 +34,6 @@ async function startDb() {
 }
 
 // Schemas
-// ... (Schemas are the same)
 const UserSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
@@ -49,9 +48,7 @@ const CheckSchema = new mongoose.Schema({
 });
 const Check = mongoose.model('Check', CheckSchema);
 
-
 // Auth Middleware
-// ... (auth middleware is the same)
 const auth = (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
   if (!token) return res.status(401).send('Access denied. No token provided.');
@@ -64,7 +61,6 @@ const auth = (req, res, next) => {
   }
 };
 
-
 // AI & Web Scraping Functions
 async function getSearchResults(query) {
     if (!BING_API_KEY) {
@@ -75,7 +71,7 @@ async function getSearchResults(query) {
         const endpoint = 'https://api.bing.microsoft.com/v7.0/search';
         const { data } = await axios.get(endpoint, {
             headers: { 'Ocp-Apim-Subscription-Key': BING_API_KEY },
-            params: { q: query, count: 3 } // Limit to 3 results for now
+            params: { q: query, count: 3 }
         });
         return data.webPages ? data.webPages.value.map(result => ({ title: result.name, url: result.url })) : [];
     } catch (error) {
@@ -88,7 +84,7 @@ async function scrapeContent(url) {
     try {
         const { data } = await axios.get(url, { timeout: 4000 });
         const $ = cheerio.load(data);
-        return $('p').text().substring(0, 5000); // Limit content size
+        return $('p').text().substring(0, 5000);
     } catch (error) {
         console.error(`Error scraping ${url}:`, error.message);
         return '';
@@ -139,55 +135,7 @@ async function paraphraseText(text) {
     }
 }
 
-
 // API Routes
-app.post('/api/check', auth, async (req, res) => {
-    const { text } = req.body;
-    if (!text || text.trim().length < 20) {
-        return res.status(400).json({ error: 'Text must be at least 20 characters long.' });
-    }
-
-    const searchResults = await getSearchResults(text.substring(0, 100));
-    const userTextEmbedding = await getEmbedding(text);
-
-    if (!userTextEmbedding) {
-        return res.status(500).json({ error: 'Could not process text for checking.' });
-    }
-
-    let similarityScores = [];
-    let sources = [];
-
-    for (const result of searchResults) {
-        const scrapedText = await scrapeContent(result.url);
-        if (scrapedText) {
-            const scrapedTextEmbedding = await getEmbedding(scrapedText);
-            const similarity = cosineSimilarity(userTextEmbedding, scrapedTextEmbedding);
-            if (similarity > 0.8) { // Similarity threshold
-                similarityScores.push(similarity);
-                sources.push(result);
-            }
-        }
-    }
-
-    const maxSimilarity = similarityScores.length > 0 ? Math.max(...similarityScores) : 0;
-    const uniquePercentage = (1 - maxSimilarity) * 100;
-
-    const newCheck = new Check({
-        user: req.user.userId,
-        content: text,
-        percentage: uniquePercentage,
-    });
-    await newCheck.save();
-
-    res.json({
-        uniquePercentage,
-        plagiarizedText: text, // Highlighting will be handled by the frontend
-        sources,
-    });
-});
-
-
-// ... (Other routes are the same)
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).send("Username and password required.");
@@ -211,6 +159,55 @@ app.post('/api/login', async (req, res) => {
   res.json({ token });
 });
 
+app.post('/api/check', auth, async (req, res) => {
+    const { text } = req.body;
+    if (!text || text.trim().length < 20) {
+        return res.status(400).json({ error: 'Text must be at least 20 characters long.' });
+    }
+
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    let sentenceResults = [];
+    let overallSimilarity = 0;
+
+    const searchResults = await getSearchResults(text.substring(0, 100));
+
+    for (const sentence of sentences) {
+        const sentenceEmbedding = await getEmbedding(sentence);
+        if (!sentenceEmbedding) continue;
+
+        let maxSimilarity = 0;
+        for (const result of searchResults) {
+            const scrapedText = await scrapeContent(result.url);
+            if (scrapedText) {
+                const scrapedTextEmbedding = await getEmbedding(scrapedText);
+                const similarity = cosineSimilarity(sentenceEmbedding, scrapedTextEmbedding);
+                if (similarity > maxSimilarity) {
+                    maxSimilarity = similarity;
+                }
+            }
+        }
+        sentenceResults.push({ sentence, similarity: maxSimilarity });
+        overallSimilarity += maxSimilarity;
+    }
+
+    const uniquePercentage = (1 - (overallSimilarity / sentences.length)) * 100;
+    const plagiarizedText = sentenceResults.map(r => r.similarity > 0.8 ? `<plagiarized>${r.sentence}</plagiarized>` : r.sentence).join(' ');
+
+    const newCheck = new Check({
+        user: req.user.userId,
+        content: text,
+        percentage: uniquePercentage,
+    });
+    await newCheck.save();
+
+    res.json({
+        uniquePercentage,
+        plagiarizedText,
+        sources: searchResults,
+        sentenceResults,
+    });
+});
+
 app.post('/api/paraphrase', auth, async (req, res) => {
     const { text } = req.body;
     if (!text) return res.status(400).json({ error: 'Text is required.' });
@@ -222,7 +219,6 @@ app.get('/api/checks', auth, async (req, res) => {
   const checks = await Check.find({ user: req.user.userId }).sort({ timestamp: -1 }).limit(20);
   res.json(checks);
 });
-
 
 async function startServer() {
     await startDb();

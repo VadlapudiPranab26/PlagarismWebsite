@@ -1,14 +1,45 @@
+"use client";
+
 import React from 'react';
+import { renderAsync } from 'docx-preview';
+import * as pdfjs from 'pdfjs-dist/build/pdf';
+pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
 interface FileUploadProps {
   onFileUpload: (file: File) => void;
+  onTextExtracted: (text: string) => void;
 }
 
-const FileUpload: React.FC<FileUploadProps> = ({ onFileUpload }) => {
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+const FileUpload: React.FC<FileUploadProps> = ({ onFileUpload, onTextExtracted }) => {
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       onFileUpload(file);
+      if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await renderAsync(arrayBuffer, document.createElement('div'));
+        const text = result.textContent || '';
+        onTextExtracted(text);
+      } else if (file.type === 'application/pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjs.getDocument(arrayBuffer).promise;
+        let text = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          text += content.items.map((item: any) => item.str).join(' ');
+        }
+        onTextExtracted(text);
+      } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target?.result as string;
+          if (text) {
+            onTextExtracted(text);
+          }
+        };
+        reader.readAsText(file);
+      }
     }
   };
 
